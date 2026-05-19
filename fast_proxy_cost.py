@@ -291,13 +291,17 @@ def compute_proxy_cost_gpu(
     placements: torch.Tensor,      # [B, N, 2] float32
     cache: BenchmarkGPUCache,
     return_components: bool = False,
+    ep_offset_override: Optional[torch.Tensor] = None,  # [B, E, 2] per-batch offsets
 ):
     """
     Compute proxy cost for a batch of placements.
 
+    ep_offset_override: optional [B, E, 2] tensor that replaces cache.ep_offset
+        for pin-position computation, enabling per-batch orientation testing.
+
     Returns [B] tensor, or dict of [B] tensors when return_components=True.
     """
-    ep_pos = _compute_ep_positions(placements, cache)
+    ep_pos = _compute_ep_positions(placements, cache, ep_offset_override)
     wl_cost = _compute_wl_cost(ep_pos, cache)
     density_cost = _compute_density_cost(placements, cache)
     congestion_cost = _compute_congestion_cost(ep_pos, placements, cache)
@@ -317,20 +321,34 @@ def compute_proxy_cost_gpu(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _compute_ep_positions(placements: torch.Tensor, cache: BenchmarkGPUCache) -> torch.Tensor:
-    """Compute all endpoint positions [B, E, 2]."""
+def _compute_ep_positions(
+    placements: torch.Tensor,
+    cache: BenchmarkGPUCache,
+    ep_offset_override: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compute all endpoint positions [B, E, 2].
+
+    ep_offset_override: if provided, shape [B, E, 2] — used instead of cache.ep_offset
+        to enable per-batch orientation variation.
+    """
     B = placements.shape[0]
     E = cache.ep_macro_idx.shape[0]
     device = placements.device
 
     non_port = ~cache.ep_is_port
     np_idx = cache.ep_macro_idx[non_port]
-    np_off = cache.ep_offset[non_port]
 
     ep_pos = torch.empty(B, E, 2, dtype=torch.float32, device=device)
-    ep_pos[:, non_port, :] = placements[:, np_idx, :] + np_off
-    ep_pos[:, cache.ep_is_port, :] = cache.ep_fixed_pos[cache.ep_is_port].unsqueeze(0)
 
+    if ep_offset_override is not None:
+        # Per-batch offsets: [B, E, 2] → index non-port entries
+        np_off_b = ep_offset_override[:, non_port, :]   # [B, n_np, 2]
+        ep_pos[:, non_port, :] = placements[:, np_idx, :] + np_off_b
+    else:
+        np_off = cache.ep_offset[non_port]               # [n_np, 2]
+        ep_pos[:, non_port, :] = placements[:, np_idx, :] + np_off
+
+    ep_pos[:, cache.ep_is_port, :] = cache.ep_fixed_pos[cache.ep_is_port].unsqueeze(0)
     return ep_pos
 
 
